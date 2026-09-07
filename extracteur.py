@@ -37,6 +37,12 @@ def analyser_facture_rapide(image):
     )
     return json.loads(response.text)
 
+def safe_str(val):
+    """Nettoie le texte pour éviter les erreurs d'encodage PDF (Latin-1)"""
+    if pd.isna(val) or val is None:
+        return ""
+    return str(val).encode('latin-1', 'replace').decode('latin-1')
+
 # ==========================================
 # 2. GESTION DE LA BASE DE DONNÉES (PROD)
 # ==========================================
@@ -265,17 +271,17 @@ with tab_relances:
                     def header(self):
                         self.set_font('helvetica', 'B', 14)
                         self.set_text_color(15, 23, 42)
-                        self.cell(0, 8, "Rapport de Revision Comptable", 0, 1, 'L')
+                        self.cell(0, 8, safe_str("Rapport de Revision Comptable"), 0, 1, 'L')
                         self.set_font('helvetica', '', 9)
                         self.set_text_color(100, 116, 139)
-                        self.cell(0, 5, f"Dossier client : {client_actif}", 0, 1, 'L')
+                        self.cell(0, 5, safe_str(f"Dossier client : {client_actif}"), 0, 1, 'L')
                         self.ln(4)
                         
                     def footer(self):
                         self.set_y(-15)
                         self.set_font('helvetica', 'I', 8)
                         self.set_text_color(150, 150, 150)
-                        self.cell(0, 10, f"Page {self.page_no()}", 0, 0, 'C')
+                        self.cell(0, 10, safe_str(f"Page {self.page_no()}"), 0, 0, 'C')
 
                 pdf = PDFReport()
                 pdf.add_page()
@@ -289,7 +295,7 @@ with tab_relances:
                 pdf.set_font('helvetica', 'B', 9)
                 pdf.set_text_color(15, 23, 42)
                 nb_let = int(df_all['justificatif_recu'].sum())
-                pdf.cell(0, 6, f"Progression du lettrage : {nb_let} lettrée(s) sur {len(df_all)} lignes totales.")
+                pdf.cell(0, 6, safe_str(f"Progression du lettrage : {nb_let} lettrée(s) sur {len(df_all)} lignes totales."))
                 pdf.ln(15)
                 
                 # En-têtes du tableau
@@ -297,7 +303,7 @@ with tab_relances:
                 pdf.set_fill_color(15, 23, 42)
                 pdf.set_text_color(255, 255, 255)
                 pdf.cell(25, 6, "Date", 1, 0, 'L', True)
-                pdf.cell(75, 6, "Libellé", 1, 0, 'L', True)
+                pdf.cell(75, 6, "Libelle", 1, 0, 'L', True)
                 pdf.cell(30, 6, "Montant", 1, 0, 'R', True)
                 pdf.cell(30, 6, "Statut", 1, 0, 'C', True)
                 pdf.cell(30, 6, "Fournisseur", 1, 1, 'L', True)
@@ -306,15 +312,15 @@ with tab_relances:
                 pdf.set_font('helvetica', '', 8)
                 pdf.set_text_color(30, 41, 59)
                 for _, row in df_all.iterrows():
-                    st_txt = "Lettré" if row['justificatif_recu'] == 1 else "Manquant"
-                    fourn = str(row['fournisseur']) if pd.notna(row['fournisseur']) else "-"
-                    pdf.cell(25, 6, str(row['date']), 1)
-                    pdf.cell(75, 6, str(row['libelle'])[:40], 1)
+                    st_txt = "Lettre" if row['justificatif_recu'] == 1 else "Manquant"
+                    fourn = safe_str(row['fournisseur']) if pd.notna(row['fournisseur']) else "-"
+                    pdf.cell(25, 6, safe_str(row['date']), 1)
+                    pdf.cell(75, 6, safe_str(row['libelle'])[:40], 1)
                     pdf.cell(30, 6, f"{row['montant']:.2f} EUR", 1, 0, 'R')
-                    pdf.cell(30, 6, st_txt, 1, 0, 'C')
+                    pdf.cell(30, 6, safe_str(st_txt), 1, 0, 'C')
                     pdf.cell(30, 6, fourn[:18], 1, 1)
                 
-                pdf_data = pdf.output()
+                pdf_data = bytes(pdf.output())
                 
                 st.download_button(
                     label="📥 Télécharger le PDF officiel",
