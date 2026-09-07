@@ -7,6 +7,7 @@ import urllib.parse
 from google import genai
 from google.genai import types
 from PIL import Image
+from weasyprint import HTML
 
 # ==========================================
 # 1. CONFIGURATION & OPTIMISATION IA
@@ -30,7 +31,7 @@ def analyser_facture_rapide(image):
     {"fournisseur": "nom", "date": "AAAA-MM-JJ", "montant_ht": 0.0, "montant_tva": 0.0, "montant_ttc": 0.0}"""
     
     response = client.models.generate_content(
-        model="gemini-3.6-flash", # Modèle mis à jour
+        model="gemini-3.6-flash",
         contents=[optimiser_image(image), prompt],
         config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1),
     )
@@ -111,6 +112,29 @@ with st.sidebar:
         st.stop()
         
     client_actif = st.selectbox("Dossier actif :", clients_dispo)
+    
+    st.divider()
+    st.subheader("⚙️ Administration")
+    
+    # Bouton de suppression avec sécurité
+    if st.button("🗑️ Supprimer ce dossier"):
+        st.session_state['confirm_delete_client'] = client_actif
+        
+    if st.session_state.get('confirm_delete_client') == client_actif:
+        st.warning(f"Confirmer la suppression définitive de **{client_actif}** et de ses données ?")
+        col_c1, col_c2 = st.columns(2)
+        if col_c1.button("Oui, supprimer", type="primary"):
+            conn = get_db_connection()
+            conn.execute("DELETE FROM transactions WHERE client_nom = ?", (client_actif,))
+            conn.execute("DELETE FROM clients WHERE nom = ?", (client_actif,))
+            conn.commit()
+            conn.close()
+            st.session_state['confirm_delete_client'] = None
+            st.success("Dossier supprimé.")
+            st.rerun()
+        if col_c2.button("Annuler"):
+            st.session_state['confirm_delete_client'] = None
+            st.rerun()
 
 # --- TABLEAU DE BORD (KPIs) ---
 conn = get_db_connection()
@@ -128,7 +152,7 @@ col_kpi3.metric("TVA Sécurisée", f"{tva_identifiee:.2f} €")
 st.divider()
 
 # --- ONGLETS MÉTIERS ---
-tab_import, tab_ocr, tab_relances = st.tabs(["1. 📥 Import Bancaire (CSV)", "2. 🤖 Lettrage IA des Justificatifs", "3. 💬 Relances Clients"])
+tab_import, tab_ocr, tab_relances = st.tabs(["1. 📥 Import Bancaire (CSV)", "2. 🤖 Lettrage IA des Justificatifs", "3. 💬 Relances & Rapports PDF"])
 
 # ONGLET 1 : IMPORT DU RELEVÉ BANCAIRE
 with tab_import:
@@ -209,23 +233,97 @@ with tab_ocr:
         df_journal["Statut"] = df_journal["justificatif_recu"].apply(lambda x: "🟢 Lettré" if x == 1 else "🔴 Manquant")
         st.dataframe(df_journal[["date", "libelle", "montant", "Statut", "fournisseur", "montant_ht", "montant_tva"]], use_container_width=True, hide_index=True)
 
-# ONGLET 3 : RELANCES CLIENTS
+# ONGLET 3 : RELANCES & RAPPORTS PDF
 with tab_relances:
     conn = get_db_connection()
+    df_all = pd.read_sql("SELECT date, libelle, montant, justificatif_recu, fournisseur FROM transactions WHERE client_nom = ?", conn, params=(client_actif,))
     cursor = conn.cursor()
     cursor.execute("SELECT date, libelle, montant FROM transactions WHERE justificatif_recu = 0 AND client_nom = ?", (client_actif,))
     manquants = cursor.fetchall()
     conn.close()
 
-    if manquants:
-        st.warning(f"{len(manquants)} pièce(s) manquante(s) pour clôturer le mois.")
+    col_rel1, col_rel2 = st.columns(2)
+    
+    with col_rel1:
+        st.subheader("💬 Relance Client WhatsApp")
+        if manquants:
+            st.warning(f"{len(manquants)} pièce(s) manquante(s).")
+            lignes_texte = "\n".join([f"- {m[0]} : {m[1]} ({m[2]} €)" for m in manquants])
+            msg = f"Bonjour,\n\nPour finaliser la saisie de votre dossier {client_actif}, merci de nous transmettre les {len(manquants)} justificatifs suivants :\n\n{lignes_texte}\n\nMerci !"
+            st.text_area("Brouillon", value=msg, height=150)
+            lien_wa = f"https://wa.me/?text={urllib.parse.quote(msg)}"
+            st.link_button("📲 Envoyer via WhatsApp", lien_wa, type="primary")
+        else:
+            st.success("Dossier à jour de ses justificatifs.")
+
+    with col_rel2:
+        st.subheader("📄 Rapport de Révision PDF")
+        st.markdown("Générez un livrable officiel du dossier client pour vos archives ou bilans.")
         
-        lignes_texte = "\n".join([f"- {m[0]} : {m[1]} ({m[2]} €)" for m in manquants])
-        msg = f"Bonjour,\n\nPour finaliser la saisie de votre dossier {client_actif}, merci de nous transmettre les {len(manquants)} justificatifs suivants :\n\n{lignes_texte}\n\nVous pouvez répondre à ce message avec les photos. Merci !"
-        
-        st.text_area("Brouillon de relance", value=msg, height=200)
-        
-        lien_wa = f"https://wa.me/?text={urllib.parse.quote(msg)}"
-        st.link_button("📲 Envoyer la relance via WhatsApp", lien_wa, type="primary")
-    elif total_lignes > 0:
-        st.success("Dossier à jour. Aucun justificatif manquant.")
+        if not df_all.empty:
+            if st.button("Générer le PDF de révision", type="primary"):
+                html_report = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta charset="utf-8">
+                    <style>
+                        @page {{ size: A4; margin: 20mm; background-color: #ffffff; }}
+                        body {{ font-family: Helvetica, Arial, sans-serif; color: #1e293b; font-size: 10pt; }}
+                        .header {{ border-bottom: 2px solid #0f172a; padding-bottom: 10px; margin-bottom: 20px; }}
+                        .header h1 {{ margin: 0; color: #0f172a; font-size: 18pt; }}
+                        .header p {{ margin: 5px 0 0 0; color: #64748b; font-size: 9pt; }}
+                        .summary {{ background: #f8fafc; border: 1px solid #e2e8f0; padding: 10px; border-radius: 6px; margin-bottom: 20px; }}
+                        table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+                        th {{ background: #0f172a; color: #ffffff; text-align: left; padding: 6px; font-size: 9pt; }}
+                        td {{ padding: 6px; border-bottom: 1px solid #e2e8f0; font-size: 9pt; }}
+                    </style>
+                </head>
+                <body>
+                    <div class="header">
+                        <h1>Rapport de Révision Comptable</h1>
+                        <p>Dossier : <strong>{client_actif}</strong> | Édité via SaaS Expertise</p>
+                    </div>
+                    <div class="summary">
+                        <strong>État d'avancement :</strong> {df_all['justificatif_recu'].sum()} lettrée(s) sur {len(df_all)} lignes totales.
+                    </div>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Date</th>
+                                <th>Libellé</th>
+                                <th>Montant</th>
+                                <th>Statut</th>
+                                <th>Fournisseur</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                """
+                for _, row in df_all.iterrows():
+                    st_txt = "Lettré" if row['justificatif_recu'] == 1 else "Manquant"
+                    fourn = row['fournisseur'] if pd.notna(row['fournisseur']) else "-"
+                    html_report += f"""
+                            <tr>
+                                <td>{row['date']}</td>
+                                <td>{row['libelle']}</td>
+                                <td>{row['montant']:.2f} €</td>
+                                <td>{st_txt}</td>
+                                <td>{fourn}</td>
+                            </tr>
+                    """
+                html_report += """
+                        </tbody>
+                    </table>
+                </body>
+                </html>
+                """
+                pdf_data = HTML(string=html_report).write_pdf()
+                st.download_button(
+                    label="📥 Télécharger le PDF officiel",
+                    data=pdf_data,
+                    file_name=f"revision_{client_actif}.pdf",
+                    mime="application/pdf",
+                    type="primary"
+                )
+        else:
+            st.info("Aucune donnée à exporter pour ce client.")
