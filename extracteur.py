@@ -1,36 +1,57 @@
+import streamlit as st
+import sqlite3
+import pandas as pd
 import json
 import os
-import sqlite3
-import time
 import urllib.parse
-import pandas as pd
-import streamlit as st
 from google import genai
 from google.genai import types
 from PIL import Image
 
-# 1. Configuration sécurisée de l'IA Gemini
+# ==========================================
+# 1. CONFIGURATION & OPTIMISATION IA
+# ==========================================
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
 except Exception:
-    api_key = os.environ.get("GEMINI_API_KEY", "TA_CLE_API_GEMINI")
+    api_key = os.environ.get("GEMINI_API_KEY", "")
 
 client = genai.Client(api_key=api_key)
 
+def optimiser_image(image):
+    """Redimensionne l'image pour accélérer le traitement IA (max 1024px)"""
+    image.thumbnail((1024, 1024))
+    return image
 
+def analyser_facture_rapide(image):
+    """Appel Gemini optimisé avec un prompt strict pour une réponse rapide"""
+    prompt = """Extrais les données de cette facture. 
+    Réponds UNIQUEMENT avec un objet JSON valide contenant exactement ces clés :
+    {"fournisseur": "nom", "date": "AAAA-MM-JJ", "montant_ht": 0.0, "montant_tva": 0.0, "montant_ttc": 0.0}"""
+    
+    response = client.models.generate_content(
+        model="gemini-1.5-flash", # Modèle le plus rapide
+        contents=[optimiser_image(image), prompt],
+        config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1),
+    )
+    return json.loads(response.text)
+
+# ==========================================
+# 2. GESTION DE LA BASE DE DONNÉES (PROD)
+# ==========================================
 def get_db_connection():
-    return sqlite3.connect("comptabilite.db")
-
+    return sqlite3.connect("compta_production.db")
 
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
-
-    try:
-        cursor.execute("SELECT client_nom FROM transactions LIMIT 1")
-    except sqlite3.OperationalError:
-        cursor.execute("DROP TABLE IF EXISTS transactions")
-
+    # Table des dossiers clients
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS clients (
+        nom TEXT PRIMARY KEY
+    )
+    """)
+    # Table des flux bancaires et lettrage
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS transactions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,299 +62,175 @@ def init_db():
         justificatif_recu INTEGER DEFAULT 0,
         fournisseur TEXT,
         montant_ht REAL,
-        montant_tva REAL
+        montant_tva REAL,
+        FOREIGN KEY(client_nom) REFERENCES clients(nom)
     )
     """)
-    cursor.execute("SELECT COUNT(*) FROM transactions")
-    if cursor.fetchone()[0] == 0:
-        reset_db()
-    conn.close()
-
-
-def reset_db():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM transactions")
-    cursor.executemany(
-        """
-    INSERT INTO transactions (client_nom, date, montant, libelle, justificatif_recu)
-    VALUES (?, ?, ?, ?, ?)
-    """,
-        [
-            ("Boulangerie Dupuis", "2026-08-24", 25.00, "CB AUCHAN RONCQ", 0),
-            ("Boulangerie Dupuis", "2026-08-22", 84.50, "CB TOTAL ENERGIES", 0),
-            ("Boulangerie Dupuis", "2026-08-20", 142.00, "PRLV Adobe Systems", 0),
-            ("Garage Martin", "2026-08-25", 350.00, "PRLV RENAULT PARTS", 0),
-            ("Garage Martin", "2026-08-21", 45.00, "CB TOTAL ENERGIES", 0),
-        ],
-    )
     conn.commit()
     conn.close()
 
-
 init_db()
 
+# ==========================================
+# 3. INTERFACE UTILISATEUR (UX/UI Cabinet)
+# ==========================================
+st.set_page_config(page_title="SaaS Expertise", page_icon="📊", layout="wide")
 
-def analyser_avec_secours(image, prompt):
-    modeles_secours = [
-        "gemini-3.6-flash",
-        "gemini-3.5-flash",
-        "gemini-3.1-flash-lite",
-    ]
-    derniere_erreur = None
+# Style CSS personnalisé pour épurer l'interface
+st.markdown("""
+    <style>
+    .stMetric { background-color: #f8fafc; padding: 15px; border-radius: 8px; border: 1px solid #e2e8f0; }
+    div[data-testid="stSidebar"] { background-color: #0f172a; }
+    div[data-testid="stSidebar"] * { color: #f8fafc !important; }
+    </style>
+""", unsafe_allow_html=True)
 
-    for m in modeles_secours:
-        try:
-            response = client.models.generate_content(
-                model=m,
-                contents=[image, prompt],
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json"
-                ),
-            )
-            return json.loads(response.text)
-        except Exception as e:
-            derniere_erreur = e
-            time.sleep(1)
-            continue
+st.title("📊 Plateforme de Révision & Lettrage IA")
 
-    raise derniere_erreur
-
-
-# 2. Interface Streamlit
-st.set_page_config(page_title="SaaS Comptable IA", layout="wide")
-st.title("🤖 SaaS Comptable - Automation Multi-Clients")
-
-# Sidebar - Gestion du Portefeuille
+# --- SIDEBAR : GESTION DES DOSSIERS ---
 with st.sidebar:
-    st.header("🏢 Portefeuille Client")
-
-    conn = get_db_connection()
-    clients_dispo = pd.read_sql(
-        "SELECT DISTINCT client_nom FROM transactions", conn
-    )["client_nom"].tolist()
-    conn.close()
-
-    client_actif = st.selectbox(
-        "Sélectionner un dossier :",
-        clients_dispo if clients_dispo else ["Aucun client"],
-    )
-
+    st.header("🏢 Portefeuille Cabinet")
+    
+    # Création d'un nouveau client
+    with st.expander("➕ Nouveau Client", expanded=False):
+        nouveau_nom = st.text_input("Raison sociale :")
+        if st.button("Créer le dossier") and nouveau_nom:
+            conn = get_db_connection()
+            try:
+                conn.execute("INSERT INTO clients (nom) VALUES (?)", (nouveau_nom.strip(),))
+                conn.commit()
+                st.success("Dossier créé.")
+            except sqlite3.IntegrityError:
+                st.error("Ce client existe déjà.")
+            conn.close()
+    
     st.divider()
-    st.header("⚙️ Administration")
-    if st.button("🔄 Réinitialiser les données de démo"):
-        reset_db()
-        st.success("Base réinitialisée !")
-        st.rerun()
+    
+    # Sélection du client actif
+    conn = get_db_connection()
+    clients_dispo = pd.read_sql("SELECT nom FROM clients", conn)["nom"].tolist()
+    conn.close()
+    
+    if not clients_dispo:
+        st.warning("Commencez par créer un dossier client.")
+        st.stop()
+        
+    client_actif = st.selectbox("Dossier actif :", clients_dispo)
 
-st.caption(f"Dossier sélectionné : **{client_actif}**")
+# --- TABLEAU DE BORD (KPIs) ---
+conn = get_db_connection()
+stats = pd.read_sql("SELECT justificatif_recu, montant_tva FROM transactions WHERE client_nom = ?", conn, params=(client_actif,))
+conn.close()
 
-tab1, tab2, tab3 = st.tabs(
-    [
-        "📊 Rapprochement & Traitement",
-        "📥 Import Relevé Bancaire",
-        "💬 Relances & Rapports",
-    ]
-)
+total_lignes = len(stats)
+lignes_lettrees = stats['justificatif_recu'].sum()
+tva_identifiee = stats['montant_tva'].sum() if not stats['montant_tva'].isna().all() else 0.0
 
-# ONGLET 1 : Rapprochement & Traitement
-with tab1:
-    st.subheader(f"📥 Déposer un justificatif pour {client_actif}")
-    uploaded_file = st.file_uploader(
-        "Importer un ticket/facture (JPG, PNG)", type=["jpg", "jpeg", "png"]
-    )
+col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
+col_kpi1.metric("Lignes Bancaires", total_lignes)
+col_kpi2.metric("Taux de Lettrage", f"{int((lignes_lettrees/total_lignes)*100)}%" if total_lignes > 0 else "0%")
+col_kpi3.metric("TVA Sécurisée", f"{tva_identifiee:.2f} €")
+st.divider()
 
-    if uploaded_file is not None:
-        image = Image.open(uploaded_file)
-        st.image(image, caption="Aperçu du justificatif", width=250)
+# --- ONGLETS MÉTIERS ---
+tab_import, tab_ocr, tab_relances = st.tabs(["1. 📥 Import Bancaire (CSV)", "2. 🤖 Lettrage IA des Justificatifs", "3. 💬 Relances Clients"])
 
-        if st.button("🚀 Lancer le rapprochement IA"):
-            with st.spinner("Analyse Gemini et rapprochement BDD..."):
-                prompt = """Analyse l'image et extrais au format JSON :
-                - 'fournisseur' (string)
-                - 'date' (AAAA-MM-JJ)
-                - 'montant_ht' (float)
-                - 'montant_tva' (float)
-                - 'montant_ttc' (float)"""
+# ONGLET 1 : IMPORT DU RELEVÉ BANCAIRE
+with tab_import:
+    st.subheader(f"Import des flux pour {client_actif}")
+    csv_upload = st.file_uploader("Glissez le relevé bancaire (CSV)", type=["csv"])
+    
+    if csv_upload:
+        df_banque = pd.read_csv(csv_upload, sep=None, engine="python")
+        st.dataframe(df_banque.head(3), use_container_width=True)
+        
+        col1, col2, col3 = st.columns(3)
+        date_col = col1.selectbox("Colonne Date :", df_banque.columns)
+        libelle_col = col2.selectbox("Colonne Libellé :", df_banque.columns)
+        montant_col = col3.selectbox("Colonne Montant :", df_banque.columns)
 
+        if st.button("Importer les écritures", type="primary"):
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            for _, row in df_banque.iterrows():
                 try:
-                    justificatif = analyser_avec_secours(image, prompt)
+                    montant_float = float(str(row[montant_col]).replace(",", ".").replace("€", "").replace(" ", ""))
+                    cursor.execute("""
+                    INSERT INTO transactions (client_nom, date, montant, libelle, justificatif_recu)
+                    VALUES (?, ?, ?, ?, 0)
+                    """, (client_actif, str(row[date_col]), montant_float, str(row[libelle_col])))
+                except ValueError:
+                    continue # Ignore les lignes sans montant valide
+            conn.commit()
+            conn.close()
+            st.success("Écritures importées avec succès.")
+            st.rerun()
 
+# ONGLET 2 : LETTRAGE IA (Rapprochement Facture/Banque)
+with tab_ocr:
+    st.subheader("Traitement des pièces comptables")
+    uploaded_files = st.file_uploader("Déposez un ou plusieurs justificatifs", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+    
+    if uploaded_files and st.button("Lancer le lettrage automatique", type="primary"):
+        for uploaded_file in uploaded_files:
+            image = Image.open(uploaded_file)
+            with st.status(f"Analyse de {uploaded_file.name}...", expanded=True) as status:
+                try:
+                    justif = analyser_facture_rapide(image)
+                    st.write(f"📝 Extraction : {justif['fournisseur']} - {justif['montant_ttc']} €")
+                    
                     conn = get_db_connection()
                     cursor = conn.cursor()
-                    cursor.execute(
-                        "SELECT id, montant, libelle FROM transactions WHERE"
-                        " justificatif_recu = 0 AND client_nom = ?",
-                        (client_actif,),
-                    )
+                    cursor.execute("SELECT id, montant, libelle FROM transactions WHERE justificatif_recu = 0 AND client_nom = ?", (client_actif,))
                     attentes = cursor.fetchall()
-
+                    
                     matched = False
                     for t_id, t_montant, t_libelle in attentes:
-                        ecart = abs(justificatif["montant_ttc"] - t_montant)
-                        nom_ok = (
-                            justificatif["fournisseur"].lower()
-                            in t_libelle.lower()
-                            or t_libelle.lower()
-                            in justificatif["fournisseur"].lower()
-                        )
-
-                        if ecart < 0.01 and nom_ok:
-                            cursor.execute(
-                                """
+                        ecart = abs(justif["montant_ttc"] - t_montant)
+                        if ecart < 0.05: # Tolérance de 5 centimes
+                            cursor.execute("""
                             UPDATE transactions 
                             SET justificatif_recu = 1, fournisseur = ?, montant_ht = ?, montant_tva = ?
                             WHERE id = ?
-                            """,
-                                (
-                                    justificatif["fournisseur"],
-                                    justificatif["montant_ht"],
-                                    justificatif["montant_tva"],
-                                    t_id,
-                                ),
-                            )
+                            """, (justif["fournisseur"], justif["montant_ht"], justif["montant_tva"], t_id))
                             conn.commit()
                             matched = True
-                            st.success(
-                                f"✅ Rapprochement validé pour {client_actif}"
-                                f" (Transaction #{t_id})"
-                            )
-                            st.balloons()
+                            status.update(label=f"✅ Rapproché avec ligne bancaire #{t_id}", state="complete")
                             break
-
                     conn.close()
-
+                    
                     if not matched:
-                        st.warning(
-                            f"⚠️ Document lu ({justificatif.get('fournisseur')},"
-                            f" {justificatif.get('montant_ttc')} €) mais aucun"
-                            f" mouvement en attente pour {client_actif}."
-                        )
+                        status.update(label="⚠️ Aucun flux bancaire correspondant trouvé", state="error")
+                        
+                except Exception as e:
+                    status.update(label=f"❌ Erreur de lecture : {e}", state="error")
 
-                except Exception as err:
-                    st.error(f"Erreur d'analyse : {err}")
-
-    st.divider()
-    st.subheader(f"📋 Relevé Bancaire - {client_actif}")
-
+    st.markdown("### Journal d'Achats (Vue lettrée)")
     conn = get_db_connection()
-    df = pd.read_sql(
-        "SELECT id, date, libelle, montant, justificatif_recu, fournisseur,"
-        " montant_ht, montant_tva FROM transactions WHERE client_nom = ?",
-        conn,
-        params=(client_actif,),
-    )
+    df_journal = pd.read_sql("SELECT date, libelle, montant, justificatif_recu, fournisseur, montant_ht, montant_tva FROM transactions WHERE client_nom = ?", conn, params=(client_actif,))
     conn.close()
+    
+    if not df_journal.empty:
+        df_journal["Statut"] = df_journal["justificatif_recu"].apply(lambda x: "🟢 Lettré" if x == 1 else "🔴 Manquant")
+        st.dataframe(df_journal[["date", "libelle", "montant", "Statut", "fournisseur", "montant_ht", "montant_tva"]], use_container_width=True, hide_index=True)
 
-    df["Statut"] = df["justificatif_recu"].apply(
-        lambda x: "✅ Reçu" if x == 1 else "❌ Manquant"
-    )
-    df_display = df[[
-        "id",
-        "date",
-        "libelle",
-        "montant",
-        "Statut",
-        "fournisseur",
-        "montant_ht",
-        "montant_tva",
-    ]]
-
-    st.dataframe(df_display, use_container_width=True)
-
-    csv_data = df_display.to_csv(index=False, sep=";").encode("utf-8")
-    st.download_button(
-        label="📁 Télécharger le Journal d'Achats (CSV)",
-        data=csv_data,
-        file_name=f"journal_achats_{client_actif.replace(' ', '_')}.csv",
-        mime="text/csv",
-    )
-
-# ONGLET 2 : Import Relevé Bancaire réel (CSV)
-with tab2:
-    st.subheader(
-        f"📥 Importer un nouveau relevé bancaire pour {client_actif}"
-    )
-    st.write(
-        "Téléversez un fichier CSV issu de la banque (colonnes requises : Date,"
-        " Libellé, Montant)."
-    )
-
-    csv_upload = st.file_uploader("Fichier CSV de la banque", type=["csv"])
-    if csv_upload is not None:
-        try:
-            df_banque = pd.read_csv(csv_upload, sep=None, engine="python")
-            st.write("Aperçu du fichier importé :", df_banque.head(3))
-
-            date_col = st.selectbox("Colonne Date :", df_banque.columns)
-            libelle_col = st.selectbox("Colonne Libellé :", df_banque.columns)
-            montant_col = st.selectbox("Colonne Montant :", df_banque.columns)
-
-            if st.button("➕ Injecter dans la BDD Client"):
-                conn = get_db_connection()
-                cursor = conn.cursor()
-                for _, row in df_banque.iterrows():
-                    cursor.execute(
-                        """
-                    INSERT INTO transactions (client_nom, date, montant, libelle, justificatif_recu)
-                    VALUES (?, ?, ?, ?, 0)
-                    """,
-                        (
-                            client_actif,
-                            str(row[date_col]),
-                            float(str(row[montant_col]).replace(",", ".")),
-                            str(row[libelle_col]),
-                        ),
-                    )
-                conn.commit()
-                conn.close()
-                st.success(
-                    f"✅ {len(df_banque)} transactions ajoutées au dossier"
-                    f" {client_actif} !"
-                )
-                st.rerun()
-        except Exception as e:
-            st.error(f"Erreur de lecture du fichier CSV : {e}")
-
-# ONGLET 3 : Relances Client & Rapports
-with tab3:
-    st.subheader(f"📲 Relances & Bilan Synthétique - {client_actif}")
-
+# ONGLET 3 : RELANCES CLIENTS
+with tab_relances:
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute(
-        "SELECT date, libelle, montant FROM transactions WHERE"
-        " justificatif_recu = 0 AND client_nom = ?",
-        (client_actif,),
-    )
+    cursor.execute("SELECT date, libelle, montant FROM transactions WHERE justificatif_recu = 0 AND client_nom = ?", (client_actif,))
     manquants = cursor.fetchall()
     conn.close()
 
     if manquants:
-        st.warning(
-            f"Il reste **{len(manquants)} transaction(s)** sans justificatif"
-            f" pour {client_actif}."
-        )
-
-        liste_achats = "\n".join(
-            [f"• {m[0]} : {m[1]} ({m[2]} €)" for m in manquants]
-        )
-        message_whatsapp = (
-            f"Bonjour {client_actif} 👋,\n\nIl vous manque {len(manquants)}"
-            " justificatif(s) pour votre comptabilité :\n\n"
-            f"{liste_achats}\n\nMerci de m'envoyer les justificatifs"
-            " directement en réponse !"
-        )
-
-        st.text_area(
-            "Message de relance WhatsApp :", value=message_whatsapp, height=160
-        )
-
-        texte_encodes = urllib.parse.quote(message_whatsapp)
-        lien_whatsapp = f"https://wa.me/?text={texte_encodes}"
-        st.markdown(
-            f"[📲 Envoyer directement via WhatsApp Web]({lien_whatsapp})",
-            unsafe_allow_html=True,
-        )
-    else:
-        st.success(f"🎉 Le dossier {client_actif} est entièrement à jour !")
+        st.warning(f"{len(manquants)} pièce(s) manquante(s) pour clôturer le mois.")
+        
+        lignes_texte = "\n".join([f"- {m[0]} : {m[1]} ({m[2]} €)" for m in manquants])
+        msg = f"Bonjour,\n\nPour finaliser la saisie de votre dossier {client_actif}, merci de nous transmettre les {len(manquants)} justificatifs suivants :\n\n{lignes_texte}\n\nVous pouvez répondre à ce message avec les photos. Merci !"
+        
+        st.text_area("Brouillon de relance", value=msg, height=200)
+        
+        lien_wa = f"https://wa.me/?text={urllib.parse.quote(msg)}"
+        st.link_button("📲 Envoyer la relance via WhatsApp", lien_wa, type="primary")
+    elif total_lignes > 0:
+        st.success("Dossier à jour. Aucun justificatif manquant.")
