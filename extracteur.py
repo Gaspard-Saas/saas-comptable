@@ -30,7 +30,7 @@ def analyser_facture_rapide(image):
     {"fournisseur": "nom", "date": "AAAA-MM-JJ", "montant_ht": 0.0, "montant_tva": 0.0, "montant_ttc": 0.0}"""
     
     response = client.models.generate_content(
-        model="gemini-1.5-flash", # Modèle le plus rapide
+        model="gemini-2.5-flash", # Modèle mis à jour et ultra-rapide
         contents=[optimiser_image(image), prompt],
         config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1),
     )
@@ -45,13 +45,11 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
-    # Table des dossiers clients
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS clients (
         nom TEXT PRIMARY KEY
     )
     """)
-    # Table des flux bancaires et lettrage
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS transactions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,7 +74,6 @@ init_db()
 # ==========================================
 st.set_page_config(page_title="SaaS Expertise", page_icon="📊", layout="wide")
 
-# Style CSS personnalisé pour épurer l'interface
 st.markdown("""
     <style>
     .stMetric { background-color: #f8fafc; padding: 15px; border-radius: 8px; border: 1px solid #e2e8f0; }
@@ -91,7 +88,6 @@ st.title("📊 Plateforme de Révision & Lettrage IA")
 with st.sidebar:
     st.header("🏢 Portefeuille Cabinet")
     
-    # Création d'un nouveau client
     with st.expander("➕ Nouveau Client", expanded=False):
         nouveau_nom = st.text_input("Raison sociale :")
         if st.button("Créer le dossier") and nouveau_nom:
@@ -106,7 +102,6 @@ with st.sidebar:
     
     st.divider()
     
-    # Sélection du client actif
     conn = get_db_connection()
     clients_dispo = pd.read_sql("SELECT nom FROM clients", conn)["nom"].tolist()
     conn.close()
@@ -160,7 +155,7 @@ with tab_import:
                     VALUES (?, ?, ?, ?, 0)
                     """, (client_actif, str(row[date_col]), montant_float, str(row[libelle_col])))
                 except ValueError:
-                    continue # Ignore les lignes sans montant valide
+                    continue
             conn.commit()
             conn.close()
             st.success("Écritures importées avec succès.")
@@ -187,7 +182,7 @@ with tab_ocr:
                     matched = False
                     for t_id, t_montant, t_libelle in attentes:
                         ecart = abs(justif["montant_ttc"] - t_montant)
-                        if ecart < 0.05: # Tolérance de 5 centimes
+                        if ecart < 0.05:
                             cursor.execute("""
                             UPDATE transactions 
                             SET justificatif_recu = 1, fournisseur = ?, montant_ht = ?, montant_tva = ?
