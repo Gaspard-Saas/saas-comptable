@@ -7,7 +7,7 @@ import urllib.parse
 from google import genai
 from google.genai import types
 from PIL import Image
-from weasyprint import HTML
+from fpdf import FPDF
 
 # ==========================================
 # 1. CONFIGURATION & OPTIMISATION IA
@@ -116,7 +116,6 @@ with st.sidebar:
     st.divider()
     st.subheader("⚙️ Administration")
     
-    # Bouton de suppression avec sécurité
     if st.button("🗑️ Supprimer ce dossier"):
         st.session_state['confirm_delete_client'] = client_actif
         
@@ -258,66 +257,65 @@ with tab_relances:
 
     with col_rel2:
         st.subheader("📄 Rapport de Révision PDF")
-        st.markdown("Générez un livrable officiel du dossier client pour vos archives ou bilans.")
+        st.markdown("Générez un livrable officiel du dossier client pour vos archives.")
         
         if not df_all.empty:
             if st.button("Générer le PDF de révision", type="primary"):
-                html_report = f"""
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <meta charset="utf-8">
-                    <style>
-                        @page {{ size: A4; margin: 20mm; background-color: #ffffff; }}
-                        body {{ font-family: Helvetica, Arial, sans-serif; color: #1e293b; font-size: 10pt; }}
-                        .header {{ border-bottom: 2px solid #0f172a; padding-bottom: 10px; margin-bottom: 20px; }}
-                        .header h1 {{ margin: 0; color: #0f172a; font-size: 18pt; }}
-                        .header p {{ margin: 5px 0 0 0; color: #64748b; font-size: 9pt; }}
-                        .summary {{ background: #f8fafc; border: 1px solid #e2e8f0; padding: 10px; border-radius: 6px; margin-bottom: 20px; }}
-                        table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
-                        th {{ background: #0f172a; color: #ffffff; text-align: left; padding: 6px; font-size: 9pt; }}
-                        td {{ padding: 6px; border-bottom: 1px solid #e2e8f0; font-size: 9pt; }}
-                    </style>
-                </head>
-                <body>
-                    <div class="header">
-                        <h1>Rapport de Révision Comptable</h1>
-                        <p>Dossier : <strong>{client_actif}</strong> | Édité via SaaS Expertise</p>
-                    </div>
-                    <div class="summary">
-                        <strong>État d'avancement :</strong> {df_all['justificatif_recu'].sum()} lettrée(s) sur {len(df_all)} lignes totales.
-                    </div>
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Date</th>
-                                <th>Libellé</th>
-                                <th>Montant</th>
-                                <th>Statut</th>
-                                <th>Fournisseur</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                """
+                class PDFReport(FPDF):
+                    def header(self):
+                        self.set_font('helvetica', 'B', 14)
+                        self.set_text_color(15, 23, 42)
+                        self.cell(0, 8, "Rapport de Revision Comptable", 0, 1, 'L')
+                        self.set_font('helvetica', '', 9)
+                        self.set_text_color(100, 116, 139)
+                        self.cell(0, 5, f"Dossier client : {client_actif}", 0, 1, 'L')
+                        self.ln(4)
+                        
+                    def footer(self):
+                        self.set_y(-15)
+                        self.set_font('helvetica', 'I', 8)
+                        self.set_text_color(150, 150, 150)
+                        self.cell(0, 10, f"Page {self.page_no()}", 0, 0, 'C')
+
+                pdf = PDFReport()
+                pdf.add_page()
+                pdf.set_font('helvetica', '', 9)
+                
+                # Encadré résumé
+                pdf.set_fill_color(248, 250, 252)
+                pdf.set_draw_color(226, 232, 240)
+                pdf.rect(10, 28, 190, 12, style='DF')
+                pdf.set_xy(12, 31)
+                pdf.set_font('helvetica', 'B', 9)
+                pdf.set_text_color(15, 23, 42)
+                nb_let = int(df_all['justificatif_recu'].sum())
+                pdf.cell(0, 6, f"Progression du lettrage : {nb_let} lettrée(s) sur {len(df_all)} lignes totales.")
+                pdf.ln(15)
+                
+                # En-têtes du tableau
+                pdf.set_font('helvetica', 'B', 8)
+                pdf.set_fill_color(15, 23, 42)
+                pdf.set_text_color(255, 255, 255)
+                pdf.cell(25, 6, "Date", 1, 0, 'L', True)
+                pdf.cell(75, 6, "Libellé", 1, 0, 'L', True)
+                pdf.cell(30, 6, "Montant", 1, 0, 'R', True)
+                pdf.cell(30, 6, "Statut", 1, 0, 'C', True)
+                pdf.cell(30, 6, "Fournisseur", 1, 1, 'L', True)
+                
+                # Lignes du tableau
+                pdf.set_font('helvetica', '', 8)
+                pdf.set_text_color(30, 41, 59)
                 for _, row in df_all.iterrows():
                     st_txt = "Lettré" if row['justificatif_recu'] == 1 else "Manquant"
-                    fourn = row['fournisseur'] if pd.notna(row['fournisseur']) else "-"
-                    html_report += f"""
-                            <tr>
-                                <td>{row['date']}</td>
-                                <td>{row['libelle']}</td>
-                                <td>{row['montant']:.2f} €</td>
-                                <td>{st_txt}</td>
-                                <td>{fourn}</td>
-                            </tr>
-                    """
-                html_report += """
-                        </tbody>
-                    </table>
-                </body>
-                </html>
-                """
-                pdf_data = HTML(string=html_report).write_pdf()
+                    fourn = str(row['fournisseur']) if pd.notna(row['fournisseur']) else "-"
+                    pdf.cell(25, 6, str(row['date']), 1)
+                    pdf.cell(75, 6, str(row['libelle'])[:40], 1)
+                    pdf.cell(30, 6, f"{row['montant']:.2f} EUR", 1, 0, 'R')
+                    pdf.cell(30, 6, st_txt, 1, 0, 'C')
+                    pdf.cell(30, 6, fourn[:18], 1, 1)
+                
+                pdf_data = pdf.output()
+                
                 st.download_button(
                     label="📥 Télécharger le PDF officiel",
                     data=pdf_data,
