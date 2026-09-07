@@ -30,7 +30,7 @@ def analyser_facture_rapide(image):
     {"fournisseur": "nom", "date": "AAAA-MM-JJ", "montant_ht": 0.0, "montant_tva": 0.0, "montant_ttc": 0.0}"""
     
     response = client.models.generate_content(
-        model="gemini-2.5-flash", # Modèle mis à jour et ultra-rapide
+        model="gemini-3.6-flash", # Modèle mis à jour
         contents=[optimiser_image(image), prompt],
         config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1),
     )
